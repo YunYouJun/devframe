@@ -1,6 +1,8 @@
 import type { DevframeMessageEntry, DevframeMessagesListDelta, DevframeRpcClientFunctions } from '@devframes/hub'
 import type { DocksContext } from '@devframes/hub/client'
 import type { Reactive } from 'vue'
+import { HUB_EVENTS } from '@devframes/hub/constants'
+import { DEVFRAME_EVENTS } from 'devframe/constants'
 import { reactive } from 'vue'
 import { addToast, dismissToast } from './toasts'
 
@@ -77,7 +79,7 @@ export function useMessages(context: DocksContext): Reactive<MessagesState> {
   const refresh = () => updateMessages().catch(() => {})
 
   context.rpc.client.register({
-    name: 'devframe:messages:updated' satisfies keyof DevframeRpcClientFunctions,
+    name: HUB_EVENTS.broadcast.messagesUpdated satisfies keyof DevframeRpcClientFunctions,
     type: 'action',
     handler: () => {
       if (context.rpc.isTrusted)
@@ -85,7 +87,14 @@ export function useMessages(context: DocksContext): Reactive<MessagesState> {
     },
   })
 
-  context.rpc.ensureTrusted().then(() => refresh())
+  // Pairing can happen at any time. Refresh when trust is granted or restored,
+  // without starting a deadline while the devframe is waiting for approval.
+  context.rpc.events.on(DEVFRAME_EVENTS.client.isTrustedUpdated, (trusted) => {
+    if (trusted)
+      refresh()
+  })
+  if (context.rpc.isTrusted)
+    refresh()
   return state
 }
 

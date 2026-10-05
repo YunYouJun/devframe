@@ -1,5 +1,8 @@
 import type { DevframeMessageEntry, DevframeMessagesListDelta } from '@devframes/hub'
 import type { DocksContext } from '@devframes/hub/client'
+import type { RpcClientEvents } from 'devframe/client'
+import { DEVFRAME_EVENTS } from 'devframe/constants'
+import { createEventEmitter } from 'devframe/utils/events'
 import { afterEach, expect, it, vi } from 'vitest'
 
 afterEach(async () => {
@@ -20,6 +23,7 @@ async function fixture() {
   const state = useMessages({ rpc: {
     call,
     isTrusted: true,
+    events: createEventEmitter<RpcClientEvents>(),
     ensureTrusted: async () => {},
     client: { register: (command: { handler: () => void }) => { refresh = command.handler } },
   } } as unknown as DocksContext)
@@ -54,4 +58,45 @@ it('keeps surviving toasts and unread counts when receiving a full snapshot', as
   expect(state.entries).toHaveLength(1)
   expect(toasts).toHaveLength(1)
   expect(state.unreadCount).toBe(1)
+})
+
+it('loads messages after late authentication and refreshes after trust is restored', async () => {
+  expect.assertions(6)
+  vi.useFakeTimers()
+  const { useMessages } = await import('./messages')
+  const events = createEventEmitter<RpcClientEvents>()
+  const trust = Promise.withResolvers<boolean>()
+  const entry: DevframeMessageEntry = { id: 'late', message: 'Ready', level: 'info', from: 'browser', timestamp: 0 }
+  const call = vi.fn(async () => ({ entries: [entry], removedIds: [], version: 1, full: true }))
+  const rpc = {
+    isTrusted: false,
+    events,
+    call,
+    ensureTrusted: () => Promise.race([
+      trust.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Trust deadline expired')), 60_000)),
+    ]),
+    client: { register: vi.fn() },
+  }
+  // eslint-disable-next-line slop/no-chained-type-assertions -- Only trust events and the message feed participate in this state test.
+  const state = useMessages({ rpc } as unknown as DocksContext)
+  await vi.advanceTimersByTimeAsync(65_000)
+  expect(call).not.toHaveBeenCalled()
+  expect(state.entries).toEqual([])
+
+  rpc.isTrusted = true
+  trust.resolve(true)
+  events.emit(DEVFRAME_EVENTS.client.isTrustedUpdated, true)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(state.entries).toEqual([entry])
+
+  rpc.isTrusted = false
+  events.emit(DEVFRAME_EVENTS.client.isTrustedUpdated, false)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(call).toHaveBeenCalledTimes(1)
+  rpc.isTrusted = true
+  events.emit(DEVFRAME_EVENTS.client.isTrustedUpdated, true)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(call).toHaveBeenCalledTimes(2)
 })
